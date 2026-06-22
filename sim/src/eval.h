@@ -14,7 +14,7 @@
 #include <array>
 #include <cstdint>
 
-namespace poker {
+namespace pkrbot::engine {
 
 inline constexpr std::array<uint16_t, 10> kStraightMasks = {
     0b1111100000000, 0b0111110000000, 0b0011111000000, 0b0001111100000,
@@ -137,4 +137,4 @@ inline uint32_t evaluate(const uint8_t* ranks, const uint8_t* suits, int n) {
   return (1u << 20) | overall;
 }
 
-}  // namespace poker
+}  // namespace pkrbot::engine
