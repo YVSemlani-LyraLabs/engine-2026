@@ -348,7 +348,7 @@ double traverse(const StateResult& result, ActionHistory& history, RegretBuffer&
                 regret[i] = traverse(next, history, regretBuffer, strategyBuffer, traverserSeat);
                 history.pop();
             } else {
-                regret[i] = -1; // illegal action
+                regret[i] = 0.0; // illegal action
             } 
         }
 
