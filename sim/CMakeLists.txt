@@ -10,5 +10,6 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 add_executable(sim src/engine.cpp)
+add_executable(traversal src/traversal.cpp)
 target_include_directories(sim PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_options(sim PRIVATE -O2 -Wall -Wextra)
