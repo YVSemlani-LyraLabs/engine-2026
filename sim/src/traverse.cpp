@@ -9,7 +9,8 @@ namespace pkrbot::engine {
 
 double traverse(const StateResult& result, ActionHistory& history, PolicyProvider& policy,
                 SampleBuffer<RegretSample>& regretBuffer,
-                SampleBuffer<StrategySample>& strategyBuffer, int traverserSeat, int iteration) {
+                SampleBuffer<StrategySample>& strategyBuffer, int traverserSeat, int iteration,
+                std::mt19937_64& rng) {
   if (std::holds_alternative<TerminalState>(result)) {
     const TerminalState& terminalState = std::get<TerminalState>(result);
     return terminalState.deltas[traverserSeat];
@@ -38,7 +39,7 @@ double traverse(const StateResult& result, ActionHistory& history, PolicyProvide
         };
         history.push(record);
         regret[i] = traverse(next, history, policy, regretBuffer, strategyBuffer, traverserSeat,
-                             iteration);
+                             iteration, rng);
         history.pop();
       }
     }
@@ -63,7 +64,7 @@ double traverse(const StateResult& result, ActionHistory& history, PolicyProvide
   }
 
   // Opponent's turn: sample one action from the policy.
-  int sampledActionIndex = samplePolicy(policyVector);
+  int sampledActionIndex = samplePolicy(policyVector, rng);
   AbstractAction sampledAction = static_cast<AbstractAction>(sampledActionIndex);
   Action action = concretizeAction(state, sampledAction);
   StateResult next = state.proceed(action);
@@ -74,8 +75,8 @@ double traverse(const StateResult& result, ActionHistory& history, PolicyProvide
       .concreteAction = action,
   };
   history.push(record);
-  double nodeValue =
-      traverse(next, history, policy, regretBuffer, strategyBuffer, traverserSeat, iteration);
+  double nodeValue = traverse(next, history, policy, regretBuffer, strategyBuffer, traverserSeat,
+                              iteration, rng);
   history.pop();
 
   StrategySample strategySample(obs, policyVector, traverserSeat, iteration);

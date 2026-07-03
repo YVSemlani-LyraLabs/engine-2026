@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstddef>
+#include <random>
 
 #include "abstraction.h"
 #include "infoset.h"
@@ -44,17 +45,26 @@ struct UniformPolicy : PolicyProvider {
   }
 };
 
-// Pick an action index from a policy vector.
-// BUG(pass 2): argmax biases MCCFR sampling; must sample from the
-// distribution (with a seeded RNG threaded through the traversal).
-inline int samplePolicy(const std::array<double, NUM_ABSTRACT_ACTIONS>& policyVector) {
-  int maxIndex = 0;
+// Sample an action index from a policy vector by inverse CDF. The vector's
+// mass sits on legal actions (illegal actions are 0 per the PolicyProvider
+// contract); sampling over the actual total tolerates numeric drift from 1.
+inline int samplePolicy(const std::array<double, NUM_ABSTRACT_ACTIONS>& policyVector,
+                        std::mt19937_64& rng) {
+  double total = 0.0;
   for (int i = 0; i < NUM_ABSTRACT_ACTIONS; i++) {
-    if (policyVector[i] > policyVector[maxIndex]) {
-      maxIndex = i;
-    }
+    total += policyVector[i];
   }
-  return maxIndex;
+  std::uniform_real_distribution<double> uni(0.0, total);
+  double r = uni(rng);
+  double acc = 0.0;
+  int last = 0;
+  for (int i = 0; i < NUM_ABSTRACT_ACTIONS; i++) {
+    if (policyVector[i] <= 0.0) continue;
+    acc += policyVector[i];
+    if (r < acc) return i;
+    last = i;
+  }
+  return last;  // r landed on the tail due to rounding
 }
 
 }  // namespace pkrbot::engine

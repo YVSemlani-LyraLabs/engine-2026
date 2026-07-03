@@ -5,6 +5,8 @@
 // sample is recorded; at opponent nodes one action is sampled from the
 // policy and a strategy sample is recorded.
 
+#include <random>
+
 #include "buffers.h"
 #include "infoset.h"
 #include "policy.h"
@@ -15,9 +17,11 @@ namespace pkrbot::engine {
 
 // Traverse the game tree rooted at `result` and return its value for
 // `traverserSeat`. `iteration` is the CFR iteration t, recorded on every
-// sample (see samples.h).
+// sample (see samples.h). `rng` drives opponent-action sampling; seed it for
+// reproducible traversals.
 double traverse(const StateResult& result, ActionHistory& history, PolicyProvider& policy,
                 SampleBuffer<RegretSample>& regretBuffer,
-                SampleBuffer<StrategySample>& strategyBuffer, int traverserSeat, int iteration);
+                SampleBuffer<StrategySample>& strategyBuffer, int traverserSeat, int iteration,
+                std::mt19937_64& rng);
 
 }  // namespace pkrbot::engine

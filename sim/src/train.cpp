@@ -26,10 +26,12 @@ namespace pkrbot::engine {
 // Run one traversal round. `deck` is reshuffled here. Returns the round's
 // value for the traverser.
 double runRound(Deck& deck, PolicyProvider& policy, SampleBuffer<RegretSample>& regretBuffer,
-                SampleBuffer<StrategySample>& strategyBuffer, int traverserSeat, int iteration) {
+                SampleBuffer<StrategySample>& strategyBuffer, int traverserSeat, int iteration,
+                std::mt19937_64& rng) {
   StateResult state = makeInitialRound(deck);
   ActionHistory history;
-  return traverse(state, history, policy, regretBuffer, strategyBuffer, traverserSeat, iteration);
+  return traverse(state, history, policy, regretBuffer, strategyBuffer, traverserSeat, iteration,
+                  rng);
 }
 
 // Run traversals for numRounds rounds, alternating the traverser seat each
@@ -43,17 +45,15 @@ std::array<double, 2> runGame(int numRounds, uint64_t seed) {
   auto regretBuffer = std::make_unique<SampleBuffer<RegretSample>>();
   auto strategyBuffer = std::make_unique<SampleBuffer<StrategySample>>();
 
-  // Seed with a real hardware random value if available
-  std::random_device rd;
-  std::mt19937 gen(rd());
+  // Derived from the run seed so opponent-action sampling (and thus the whole
+  // run) is reproducible; offset to decorrelate from the deck's stream.
+  std::mt19937_64 rng(seed ^ 0x9e3779b97f4a7c15ULL);
   std::uniform_int_distribution<int> distrib(0, 1);
-
-  // Generate random 0 or 1
-  int traverserSeat = distrib(gen);
+  int traverserSeat = distrib(rng);
 
   for (int round = 1; round <= numRounds; ++round) {
     bankroll[traverserSeat] +=
-        runRound(deck, policy, *regretBuffer, *strategyBuffer, traverserSeat, round);
+        runRound(deck, policy, *regretBuffer, *strategyBuffer, traverserSeat, round, rng);
     traverserSeat = 1 - traverserSeat;
   }
   return bankroll;
