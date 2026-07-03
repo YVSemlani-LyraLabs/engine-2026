@@ -4,10 +4,10 @@
 // fixed-size PODs so a buffer of them can be written out as flat binary and
 // read back in Python as a numpy structured dtype.
 //
-// `iteration` records the CFR iteration t that produced the sample. It is not
-// consumed anywhere yet; it is reserved for linear-CFR sample weighting
-// (Brown et al.), which lands in a later pass. Recording it now keeps the
-// on-disk format stable.
+// `iteration` records the CFR iteration t that produced the sample. It is the
+// linear-CFR sample weight (Brown et al.): the buffers retain samples
+// uniformly across iterations (reservoir sampling, buffers.h), and the
+// trainer weights each sample's loss by t.
 
 #include <array>
 #include <type_traits>

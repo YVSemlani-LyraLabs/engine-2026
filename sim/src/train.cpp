@@ -41,9 +41,11 @@ std::array<double, 2> runGame(int numRounds, uint64_t seed) {
   std::array<double, 2> bankroll = {0, 0};
   UniformPolicy policy;
   // Buffers are large (BUFFER_SIZE * sizeof(sample) each), so keep them off
-  // the stack.
-  auto regretBuffer = std::make_unique<SampleBuffer<RegretSample>>();
-  auto strategyBuffer = std::make_unique<SampleBuffer<StrategySample>>();
+  // the stack. Reservoir-eviction seeds derive from the run seed (distinct
+  // offsets per buffer) so the whole run stays reproducible.
+  auto regretBuffer = std::make_unique<SampleBuffer<RegretSample>>(seed ^ 0xd1b54a32d192ed03ULL);
+  auto strategyBuffer =
+      std::make_unique<SampleBuffer<StrategySample>>(seed ^ 0x94d049bb133111ebULL);
 
   // Derived from the run seed so opponent-action sampling (and thus the whole
   // run) is reproducible; offset to decorrelate from the deck's stream.

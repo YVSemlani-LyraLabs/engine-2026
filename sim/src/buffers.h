@@ -7,9 +7,11 @@
 // small header (magic, version, record size). The Python/PyTorch trainer
 // reads the chunks back as a numpy structured dtype.
 
-#include <cstddef>
-
+#include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstdint>
+#include <random>
 
 namespace pkrbot::engine {
 
@@ -23,19 +25,37 @@ struct SampleSink {
   virtual void write(const T* /*samples*/, size_t /*n*/) {}
 };
 
-// Fixed-capacity buffer of training samples.
-// TODO(pass 2): replace ring overwrite with reservoir sampling per
-// Brown et al.; overwriting the oldest samples biases the buffer toward
-// recent iterations.
+// Fixed-capacity reservoir of training samples (Algorithm R, per Deep CFR /
+// Brown et al.): every sample ever pushed is equally likely to be in the
+// buffer, so the buffer is an unbiased draw across all CFR iterations.
+// Linear-CFR weighting is therefore applied at training time from each
+// sample's `iteration` field (see samples.h), not by biasing retention here.
 template <typename T>
 struct SampleBuffer {
   std::array<T, BUFFER_SIZE> samples;
-  int idx = 0;
+  long long seen = 0;  // total samples pushed; only the first size() slots are valid
+
+  // `seed` drives reservoir eviction only; it is deliberately separate from
+  // the traversal rng so buffer bookkeeping never perturbs game trajectories.
+  explicit SampleBuffer(uint64_t seed) : rng(seed) {}
 
   void push(const T& sample) {
-    samples[idx] = sample;
-    idx = (idx + 1) % BUFFER_SIZE;
+    if (seen < BUFFER_SIZE) {
+      samples[seen] = sample;
+    } else {
+      // Keep the new sample with probability BUFFER_SIZE / (seen + 1).
+      long long j = std::uniform_int_distribution<long long>(0, seen)(rng);
+      if (j < BUFFER_SIZE) samples[j] = sample;
+    }
+    ++seen;
   }
+
+  size_t size() const {
+    return static_cast<size_t>(std::min<long long>(seen, BUFFER_SIZE));
+  }
+
+ private:
+  std::mt19937_64 rng;
 };
 
 }  // namespace pkrbot::engine
