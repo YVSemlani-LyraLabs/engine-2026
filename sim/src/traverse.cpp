@@ -20,8 +20,11 @@ double traverse(const StateResult& result, ActionHistory& history, PolicyProvide
 
   int active = state.active();
   InfoSet obs = makeInfoSet(state, history);
-  std::array<double, NUM_ABSTRACT_ACTIONS> policyVector;
-  policy.evaluate(&obs, 1, &policyVector);  // batch of one; see policy.h
+  PolicyVector policyVector;
+  // A single call per decision point; when `policy` is a BatchedPolicy this
+  // blocks while the shared batcher coalesces it with other workers' requests
+  // into one backend evaluation (see inference.h).
+  policy.evaluate(&obs, 1, &policyVector);
 
   if (active == traverserSeat) {
     // Traverser's turn: evaluate every legal action. Illegal actions keep
