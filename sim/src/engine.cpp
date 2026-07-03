@@ -12,6 +12,7 @@
 
 #include "bot.h"
 #include "deck.h"
+#include "driver.h"
 #include "state.h"
 
 namespace pkrbot::engine {
@@ -37,19 +38,8 @@ Action sanitize(const RoundState& rs, Action action) {
 // Play one round. `deck` is reshuffled here; seat0/seat1 are the bots sitting in
 // seats 0 and 1 for this round. Returns {delta_seat0, delta_seat1}.
 std::array<int, 2> runRound(Deck& deck, Bot& seat0, Bot& seat1) {
-  deck.reset();
-  deck.shuffle();
-  std::array<std::vector<Card>, 2> hands = {deck.deal(3), deck.deal(3)};
-  RoundState start{0,
-                   0,
-                   {SMALL_BLIND, BIG_BLIND},
-                   {STARTING_STACK - SMALL_BLIND, STARTING_STACK - BIG_BLIND},
-                   std::move(hands),
-                   {},
-                   &deck};
-
   Bot* seats[2] = {&seat0, &seat1};
-  StateResult state = std::move(start);
+  StateResult state = makeInitialRound(deck);
   while (std::holds_alternative<RoundState>(state)) {
     const RoundState& cur = std::get<RoundState>(state);
     int seat = cur.active();

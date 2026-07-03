@@ -9,7 +9,13 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Shared include dirs and compile options for all simulator targets.
+add_library(sim_core INTERFACE)
+target_include_directories(sim_core INTERFACE ${PROJECT_SOURCE_DIR}/src)
+target_compile_options(sim_core INTERFACE -O2 -Wall -Wextra)
+
 add_executable(sim src/engine.cpp)
-add_executable(traversal src/traversal.cpp)
-target_include_directories(sim PRIVATE ${PROJECT_SOURCE_DIR}/src)
-target_compile_options(sim PRIVATE -O2 -Wall -Wextra)
+target_link_libraries(sim PRIVATE sim_core)
+
+add_executable(train src/train.cpp src/traverse.cpp)
+target_link_libraries(train PRIVATE sim_core)
