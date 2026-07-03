@@ -11,6 +11,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <random>
 
 namespace pkrbot::engine {
@@ -30,6 +31,11 @@ struct SampleSink {
 // buffer, so the buffer is an unbiased draw across all CFR iterations.
 // Linear-CFR weighting is therefore applied at training time from each
 // sample's `iteration` field (see samples.h), not by biasing retention here.
+//
+// push()/size() are thread-safe: the buffers are shared by the parallel
+// traversal workers that feed the inference batcher (train.cpp). Reservoir
+// uniformity is order-independent, so interleaved pushes from many workers
+// stay an unbiased draw; only the exact retained set varies with interleaving.
 template <typename T>
 struct SampleBuffer {
   std::array<T, BUFFER_SIZE> samples;
@@ -40,6 +46,7 @@ struct SampleBuffer {
   explicit SampleBuffer(uint64_t seed) : rng(seed) {}
 
   void push(const T& sample) {
+    std::lock_guard<std::mutex> lock(mu);
     if (seen < BUFFER_SIZE) {
       samples[seen] = sample;
     } else {
@@ -51,10 +58,17 @@ struct SampleBuffer {
   }
 
   size_t size() const {
+    std::lock_guard<std::mutex> lock(mu);
     return static_cast<size_t>(std::min<long long>(seen, BUFFER_SIZE));
   }
 
+  long long totalSeen() const {
+    std::lock_guard<std::mutex> lock(mu);
+    return seen;
+  }
+
  private:
+  mutable std::mutex mu;
   std::mt19937_64 rng;
 };
 

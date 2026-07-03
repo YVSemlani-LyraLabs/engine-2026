@@ -20,6 +20,11 @@ namespace pkrbot::engine {
 
 inline constexpr int NUM_ABSTRACT_ACTIONS = 10;
 
+// One probability (or advantage/regret) per abstract action. This is the unit
+// policy evaluation traffics in: PolicyProvider fills them, the traversal
+// samples from them, and inference batches produce one per infoset.
+using PolicyVector = std::array<double, NUM_ABSTRACT_ACTIONS>;
+
 enum class AbstractAction {
   Fold,
   Call,
