@@ -18,10 +18,12 @@ namespace pkrbot::engine {
 // Traverse the game tree rooted at `result` and return its value for
 // `traverserSeat`. `iteration` is the CFR iteration t, recorded on every
 // sample (see samples.h). `rng` drives opponent-action sampling; seed it for
-// reproducible traversals.
+// reproducible traversals. Samples go through the caller's worker-local
+// ReservoirWriters (buffers.h), so recording a sample never touches the
+// shared buffers' locks.
 double traverse(const StateResult& result, ActionHistory& history, PolicyProvider& policy,
-                SampleBuffer<RegretSample>& regretBuffer,
-                SampleBuffer<StrategySample>& strategyBuffer, int traverserSeat, int iteration,
+                ReservoirWriter<RegretSample>& regretWriter,
+                ReservoirWriter<StrategySample>& strategyWriter, int traverserSeat, int iteration,
                 std::mt19937_64& rng);
 
 }  // namespace pkrbot::engine

@@ -15,9 +15,11 @@
 // exception: eviction depends on cross-worker push interleaving.
 //
 // The flywheel: --out dumps the regret/strategy reservoirs as flat binary for
-// the Python trainer (train/train_advantage.py), and --engine loads the
-// TorchScript advantage net the trainer exports (net_policy.h), closing the
-// data-collection -> training -> data-collection loop.
+// the Python trainer (train/train_advantage.py), --load resumes them so the
+// buffers accumulate across CFR iterations (the dumps carry full reservoir
+// state, see buffers.h), and --engine loads the TorchScript advantage net the
+// trainer exports (net_policy.h), closing the data-collection -> training ->
+// data-collection loop.
 
 #include <array>
 #include <chrono>
@@ -58,8 +60,16 @@ struct TrainConfig {
   // it must be tuned together with batching.maxBatchSize.
   int numWorkers = 8;
   BatchingConfig batching;
+  // Reservoir capacity of each sample buffer. When resuming (--load) a
+  // saturated reservoir, this must match the loaded file's retained count
+  // (see loadSamples in buffers.h).
+  size_t bufferSize = DEFAULT_BUFFER_SIZE;
   std::string enginePath;  // empty: UniformPolicy; else TorchScript module
   std::string outDir;      // empty: discard samples; else write regret.bin/strategy.bin here
+  // Resume the reservoirs from a previous step's regret.bin/strategy.bin
+  // before collecting, so the buffers accumulate across CFR iterations (Deep
+  // CFR trains each net on the memory of ALL iterations, not just the latest).
+  std::string loadDir;  // empty: start empty buffers
   // Bypass the batcher: workers call the backend directly with n = 1. Only
   // valid for thread-safe, stateless backends (UniformPolicy), so it is
   // rejected together with --engine. Useful as the A/B baseline when tuning
@@ -70,12 +80,12 @@ struct TrainConfig {
 
 // Run one traversal round. `deck` is reshuffled here. Returns the round's
 // value for the traverser.
-double runRound(Deck& deck, PolicyProvider& policy, SampleBuffer<RegretSample>& regretBuffer,
-                SampleBuffer<StrategySample>& strategyBuffer, int traverserSeat, int iteration,
+double runRound(Deck& deck, PolicyProvider& policy, ReservoirWriter<RegretSample>& regretWriter,
+                ReservoirWriter<StrategySample>& strategyWriter, int traverserSeat, int iteration,
                 std::mt19937_64& rng) {
   StateResult state = makeInitialRound(deck);
   ActionHistory history;
-  return traverse(state, history, policy, regretBuffer, strategyBuffer, traverserSeat, iteration,
+  return traverse(state, history, policy, regretWriter, strategyWriter, traverserSeat, iteration,
                   rng);
 }
 
@@ -96,6 +106,9 @@ inline uint64_t mixSeed(uint64_t x) {
 // grouping. Every sample is stamped with config.cfrIteration.
 // `batcher` may be null (--no-batch), in which case workers call `backend`
 // directly with single-infoset batches.
+// Samples are staged in worker-local ReservoirWriters and folded into the
+// shared buffers a batch at a time, so workers never serialize on the buffer
+// mutexes per sample.
 void runWorker(const TrainConfig& config, int workerIndex, InferenceBatcher* batcher,
                PolicyProvider& backend, SampleBuffer<RegretSample>& regretBuffer,
                SampleBuffer<StrategySample>& strategyBuffer, std::array<double, 2>& bankroll) {
@@ -103,15 +116,20 @@ void runWorker(const TrainConfig& config, int workerIndex, InferenceBatcher* bat
   if (batcher) batched = std::make_unique<BatchedPolicy>(*batcher);
   PolicyProvider& policy = batcher ? static_cast<PolicyProvider&>(*batched) : backend;
 
+  ReservoirWriter<RegretSample> regretWriter(regretBuffer);
+  ReservoirWriter<StrategySample> strategyWriter(strategyBuffer);
+
   for (int round = workerIndex + 1; round <= config.numRounds; round += config.numWorkers) {
     uint64_t roundSeed = mixSeed(config.seed() * 0x100000001b3ULL + static_cast<uint64_t>(round));
     Deck deck(roundSeed);
     // Offset to decorrelate opponent-action sampling from the deck's stream.
     std::mt19937_64 rng(roundSeed ^ 0x9e3779b97f4a7c15ULL);
     int traverserSeat = round % 2;
-    bankroll[traverserSeat] += runRound(deck, policy, regretBuffer, strategyBuffer, traverserSeat,
+    bankroll[traverserSeat] += runRound(deck, policy, regretWriter, strategyWriter, traverserSeat,
                                         config.cfrIteration, rng);
   }
+  regretWriter.flush();
+  strategyWriter.flush();
   // Required so the batcher stops waiting on this worker when forming
   // batches; without it the remaining workers' batches only flush on timeout.
   if (batcher) batcher->workerFinished();
@@ -122,17 +140,23 @@ struct TrainResult {
   BatcherStats batcherStats;
   long long regretSamples = 0;
   long long strategySamples = 0;
+  long long regretSeen = 0;
+  long long strategySeen = 0;
 };
 
 TrainResult runGame(const TrainConfig& config) {
-  // Buffers are large (BUFFER_SIZE * sizeof(sample) each), so keep them off
-  // the stack. Reservoir-eviction seeds derive from the run seed (distinct
-  // offsets per buffer); they only affect which samples are retained, never
-  // game trajectories.
-  auto regretBuffer =
-      std::make_unique<SampleBuffer<RegretSample>>(config.seed() ^ 0xd1b54a32d192ed03ULL);
-  auto strategyBuffer =
-      std::make_unique<SampleBuffer<StrategySample>>(config.seed() ^ 0x94d049bb133111ebULL);
+  // Reservoir-eviction seeds derive from the run seed (distinct offsets per
+  // buffer); they only affect which samples are retained, never game
+  // trajectories.
+  SampleBuffer<RegretSample> regretBuffer(config.bufferSize,
+                                          config.seed() ^ 0xd1b54a32d192ed03ULL);
+  SampleBuffer<StrategySample> strategyBuffer(config.bufferSize,
+                                              config.seed() ^ 0x94d049bb133111ebULL);
+
+  if (!config.loadDir.empty()) {
+    loadSamples(regretBuffer, config.loadDir + "/regret.bin");
+    loadSamples(strategyBuffer, config.loadDir + "/strategy.bin");
+  }
 
   std::unique_ptr<PolicyProvider> backend;
   if (!config.enginePath.empty()) {
@@ -153,15 +177,15 @@ TrainResult runGame(const TrainConfig& config) {
   workers.reserve(config.numWorkers);
   for (int w = 0; w < config.numWorkers; ++w) {
     workers.emplace_back(runWorker, std::cref(config), w, batcher.get(), std::ref(*backend),
-                         std::ref(*regretBuffer), std::ref(*strategyBuffer),
+                         std::ref(regretBuffer), std::ref(strategyBuffer),
                          std::ref(bankrolls[w]));
   }
   for (std::thread& worker : workers) worker.join();
 
   if (!config.outDir.empty()) {
     std::filesystem::create_directories(config.outDir);
-    writeSamples(*regretBuffer, config.outDir + "/regret.bin");
-    writeSamples(*strategyBuffer, config.outDir + "/strategy.bin");
+    writeSamples(regretBuffer, config.outDir + "/regret.bin");
+    writeSamples(strategyBuffer, config.outDir + "/strategy.bin");
   }
 
   TrainResult result;
@@ -169,8 +193,10 @@ TrainResult runGame(const TrainConfig& config) {
     result.bankroll[0] += b[0];
     result.bankroll[1] += b[1];
   }
-  result.regretSamples = static_cast<long long>(regretBuffer->size());
-  result.strategySamples = static_cast<long long>(strategyBuffer->size());
+  result.regretSamples = static_cast<long long>(regretBuffer.size());
+  result.strategySamples = static_cast<long long>(strategyBuffer.size());
+  result.regretSeen = regretBuffer.totalSeen();
+  result.strategySeen = strategyBuffer.totalSeen();
   if (batcher) result.batcherStats = batcher->stats();
   return result;
 }
@@ -190,9 +216,14 @@ void printUsage(const char* prog) {
             << "  --workers W           traversal worker threads (default 8)\n"
             << "  --batch-size B        max infosets per inference call (default 256)\n"
             << "  --flush-timeout-us T  partial-batch flush timeout in microseconds (default 250)\n"
+            << "  --buffer-size N       reservoir capacity of each sample buffer (default "
+            << DEFAULT_BUFFER_SIZE << ")\n"
             << "  --engine PATH         TorchScript advantage net exported by the trainer\n"
             << "                        (default: uniform policy backend)\n"
-            << "  --out DIR             write regret.bin / strategy.bin sample dumps to DIR\n"
+            << "  --out DIR             write regret.bin / strategy.bin reservoir state to DIR\n"
+            << "  --load DIR            resume the reservoirs from DIR's regret.bin /\n"
+            << "                        strategy.bin before collecting, accumulating samples\n"
+            << "                        across CFR iterations\n"
             << "  --no-batch            bypass the batcher; workers call the backend directly\n"
             << "                        (uniform backend only; baseline for batch-size tuning)\n";
 }
@@ -228,6 +259,15 @@ bool parseArgs(int argc, char** argv, TrainConfig& config) {
       const char* v = next();
       if (!v) return false;
       config.batching.flushTimeout = std::chrono::microseconds(std::atoll(v));
+    } else if (arg == "--buffer-size") {
+      const char* v = next();
+      if (!v) return false;
+      long long n = std::atoll(v);
+      if (n < 1) {
+        std::cerr << "--buffer-size must be >= 1\n";
+        return false;
+      }
+      config.bufferSize = static_cast<size_t>(n);
     } else if (arg == "--engine") {
       const char* v = next();
       if (!v) return false;
@@ -236,6 +276,10 @@ bool parseArgs(int argc, char** argv, TrainConfig& config) {
       const char* v = next();
       if (!v) return false;
       config.outDir = v;
+    } else if (arg == "--load") {
+      const char* v = next();
+      if (!v) return false;
+      config.loadDir = v;
     } else if (arg == "--no-batch") {
       config.noBatch = true;
     } else if (arg == "--help" || arg == "-h") {
@@ -273,7 +317,13 @@ int main(int argc, char** argv) {
   }
 
   auto start = std::chrono::steady_clock::now();
-  TrainResult result = runGame(config);
+  TrainResult result;
+  try {
+    result = runGame(config);
+  } catch (const std::exception& e) {
+    std::cerr << "error: " << e.what() << "\n";
+    return 1;
+  }
   auto end = std::chrono::steady_clock::now();
 
   double secs = std::chrono::duration<double>(end - start).count();
@@ -283,8 +333,10 @@ int main(int argc, char** argv) {
             << "traverser seat 1:  " << result.bankroll[1] << "\n"
             << "throughput:        " << static_cast<long long>(config.numRounds / secs)
             << " rounds/s\n"
-            << "regret samples:    " << result.regretSamples << "\n"
-            << "strategy samples:  " << result.strategySamples << "\n";
+            << "regret samples:    " << result.regretSamples << " retained of "
+            << result.regretSeen << " seen\n"
+            << "strategy samples:  " << result.strategySamples << " retained of "
+            << result.strategySeen << " seen\n";
   if (!config.outDir.empty()) {
     std::cout << "sample dumps:      " << config.outDir << "/{regret,strategy}.bin\n";
   }

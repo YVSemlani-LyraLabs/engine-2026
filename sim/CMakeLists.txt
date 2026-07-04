@@ -40,3 +40,6 @@ endforeach()
 
 add_executable(batch_test src/batch_test.cpp src/inference.cpp)
 target_link_libraries(batch_test PRIVATE sim_core Threads::Threads)
+
+add_executable(buffer_test src/buffer_test.cpp)
+target_link_libraries(buffer_test PRIVATE sim_core Threads::Threads)

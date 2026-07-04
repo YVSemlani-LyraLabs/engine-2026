@@ -1,11 +1,14 @@
 """Reader and feature encoder for the C++ simulator's sample dumps.
 
 The simulator (sim/src/train.cpp --out DIR) writes the regret/strategy
-reservoirs as flat binary: three uint64 header fields (magic "PKRS",
-sizeof(record), record count) followed by raw trivially-copyable records
-(sim/src/samples.h). The numpy structured dtypes below mirror those structs
-field for field with C alignment (align=True), and the header's record-size
-field is checked at load time so struct-layout drift fails loudly.
+reservoirs as flat binary: five uint64 header fields (magic "PKRS", format
+version, sizeof(record), retained record count, total samples seen) followed
+by raw trivially-copyable records (sim/src/samples.h). The `seen` field makes
+the dump complete reservoir state — the simulator can resume it with --load —
+but the trainer only consumes the records. The numpy structured dtypes below
+mirror those structs field for field with C alignment (align=True), and the
+header's record-size field is checked at load time so struct-layout drift
+fails loudly.
 
 encode_infosets() is the Python mirror of encodeInfoSet() in
 sim/src/encoding.h: it turns a record array of InfoSets into the flat float32
@@ -36,6 +39,7 @@ from .features import (
 )
 
 SAMPLE_FILE_MAGIC = 0x53524B50  # "PKRS" little-endian
+SAMPLE_FILE_VERSION = 2
 
 # sim/src/infoset.h ActionRecord: player, street, AbstractAction, Action{type, amount}.
 ACTION_RECORD_DTYPE = np.dtype(
@@ -88,9 +92,20 @@ STRATEGY_SAMPLE_DTYPE = _sample_dtype("strategy")
 def load_samples(path: str, dtype: np.dtype) -> np.ndarray:
     """Load a sample dump written by writeSamples() (sim/src/buffers.h)."""
     with open(path, "rb") as f:
-        magic, record_size, count = np.fromfile(f, dtype="<u8", count=3)
+        header = np.fromfile(f, dtype="<u8", count=5)
+        if len(header) < 5:
+            raise ValueError(f"{path}: truncated header")
+        magic, version, record_size, count, seen = header
         if magic != SAMPLE_FILE_MAGIC:
             raise ValueError(f"{path}: bad magic {magic:#x}")
+        if version != SAMPLE_FILE_VERSION:
+            raise ValueError(
+                f"{path}: unsupported sample-file version {version} "
+                f"(want {SAMPLE_FILE_VERSION}; version-1 dumps predate the resumable "
+                "header — regenerate with the current simulator)"
+            )
+        if seen < count:
+            raise ValueError(f"{path}: corrupt header (seen {seen} < count {count})")
         if record_size != dtype.itemsize:
             raise ValueError(
                 f"{path}: record size {record_size} != dtype itemsize {dtype.itemsize}; "

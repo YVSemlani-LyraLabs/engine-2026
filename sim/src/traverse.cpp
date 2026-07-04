@@ -8,8 +8,8 @@
 namespace pkrbot::engine {
 
 double traverse(const StateResult& result, ActionHistory& history, PolicyProvider& policy,
-                SampleBuffer<RegretSample>& regretBuffer,
-                SampleBuffer<StrategySample>& strategyBuffer, int traverserSeat, int iteration,
+                ReservoirWriter<RegretSample>& regretWriter,
+                ReservoirWriter<StrategySample>& strategyWriter, int traverserSeat, int iteration,
                 std::mt19937_64& rng) {
   if (std::holds_alternative<TerminalState>(result)) {
     const TerminalState& terminalState = std::get<TerminalState>(result);
@@ -41,7 +41,7 @@ double traverse(const StateResult& result, ActionHistory& history, PolicyProvide
             .concreteAction = action,
         };
         history.push(record);
-        regret[i] = traverse(next, history, policy, regretBuffer, strategyBuffer, traverserSeat,
+        regret[i] = traverse(next, history, policy, regretWriter, strategyWriter, traverserSeat,
                              iteration, rng);
         history.pop();
       }
@@ -62,7 +62,7 @@ double traverse(const StateResult& result, ActionHistory& history, PolicyProvide
     }
 
     RegretSample regretSample(obs, regret, traverserSeat, iteration);
-    regretBuffer.push(regretSample);
+    regretWriter.push(regretSample);
     return nodeValue;
   }
 
@@ -78,12 +78,12 @@ double traverse(const StateResult& result, ActionHistory& history, PolicyProvide
       .concreteAction = action,
   };
   history.push(record);
-  double nodeValue = traverse(next, history, policy, regretBuffer, strategyBuffer, traverserSeat,
+  double nodeValue = traverse(next, history, policy, regretWriter, strategyWriter, traverserSeat,
                               iteration, rng);
   history.pop();
 
   StrategySample strategySample(obs, policyVector, traverserSeat, iteration);
-  strategyBuffer.push(strategySample);
+  strategyWriter.push(strategySample);
 
   return nodeValue;
 }
