@@ -23,7 +23,7 @@
 
 namespace pkrbot::engine {
 
-constexpr size_t DEFAULT_BUFFER_SIZE = 100000;
+constexpr size_t DEFAULT_BUFFER_SIZE = 40000000;
 
 // File layout: five uint64 header fields (magic "PKRS", format version,
 // sizeof(record), retained record count, total samples seen) followed by
