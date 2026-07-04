@@ -43,6 +43,11 @@ namespace pkrbot::engine {
 struct TrainConfig {
   int numRounds = 100000;
   uint64_t seed = 1;
+  // CFR iteration t of this data-collection step, supplied by the outer
+  // training loop. Recorded on every sample as the linear-CFR weight (Deep
+  // CFR, Brown et al.): all traversals in a step run against the same frozen
+  // policy, so they all share t.
+  int cfrIteration = 1;
   // Traversal workers submitting to the batcher. The effective batch size is
   // capped by this (each blocked worker contributes one pending request), so
   // it must be tuned together with batching.maxBatchSize.
@@ -82,7 +87,7 @@ inline uint64_t mixSeed(uint64_t x) {
 // workerIndex+1+numWorkers, ...), accumulating the traverser's value per seat
 // into `bankroll`. Each round reseeds the deck and rng from (seed, round), so
 // the trajectory of round r is identical regardless of worker count or batch
-// grouping. Round index doubles as the linear-CFR iteration t.
+// grouping. Every sample is stamped with config.cfrIteration.
 // `batcher` may be null (--no-batch), in which case workers call `backend`
 // directly with single-infoset batches.
 void runWorker(const TrainConfig& config, int workerIndex, InferenceBatcher* batcher,
@@ -98,8 +103,8 @@ void runWorker(const TrainConfig& config, int workerIndex, InferenceBatcher* bat
     // Offset to decorrelate opponent-action sampling from the deck's stream.
     std::mt19937_64 rng(roundSeed ^ 0x9e3779b97f4a7c15ULL);
     int traverserSeat = round % 2;
-    bankroll[traverserSeat] +=
-        runRound(deck, policy, regretBuffer, strategyBuffer, traverserSeat, round, rng);
+    bankroll[traverserSeat] += runRound(deck, policy, regretBuffer, strategyBuffer, traverserSeat,
+                                        config.cfrIteration, rng);
   }
   // Required so the batcher stops waiting on this worker when forming
   // batches; without it the remaining workers' batches only flush on timeout.
@@ -163,6 +168,8 @@ void printUsage(const char* prog) {
   std::cerr << "usage: " << prog << " [options] [numRounds] [seed]\n"
             << "  --rounds N            traversal rounds to run (default 100000)\n"
             << "  --seed S              run seed (default 1)\n"
+            << "  --iteration T         CFR iteration of this data-collection step; recorded on\n"
+            << "                        every sample as the linear-CFR weight (default 1)\n"
             << "  --workers W           traversal worker threads (default 8)\n"
             << "  --batch-size B        max infosets per inference call (default 256)\n"
             << "  --flush-timeout-us T  partial-batch flush timeout in microseconds (default 250)\n"
@@ -190,6 +197,10 @@ bool parseArgs(int argc, char** argv, TrainConfig& config) {
       const char* v = next();
       if (!v) return false;
       config.seed = std::strtoull(v, nullptr, 10);
+    } else if (arg == "--iteration") {
+      const char* v = next();
+      if (!v) return false;
+      config.cfrIteration = std::atoi(v);
     } else if (arg == "--workers") {
       const char* v = next();
       if (!v) return false;
@@ -223,9 +234,10 @@ bool parseArgs(int argc, char** argv, TrainConfig& config) {
       return false;
     }
   }
-  if (config.numRounds < 1 || config.numWorkers < 1 || config.batching.maxBatchSize < 1 ||
-      config.batching.flushTimeout.count() < 0) {
-    std::cerr << "rounds, workers, and batch size must be >= 1; flush timeout must be >= 0\n";
+  if (config.numRounds < 1 || config.cfrIteration < 1 || config.numWorkers < 1 ||
+      config.batching.maxBatchSize < 1 || config.batching.flushTimeout.count() < 0) {
+    std::cerr << "rounds, iteration, workers, and batch size must be >= 1; flush timeout must be "
+                 ">= 0\n";
     return false;
   }
   if (config.noBatch && !config.enginePath.empty()) {
