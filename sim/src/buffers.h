@@ -1,30 +1,30 @@
 #pragma once
 
-// In-memory sample buffers plus the write-out seam.
+// In-memory sample buffers plus the on-disk write-out.
 //
-// On-disk plan (pass 2): SampleSink implementations serialize samples as
-// chunked flat binary of the trivially-copyable records (samples.h) with a
-// small header (magic, version, record size). The Python/PyTorch trainer
-// reads the chunks back as a numpy structured dtype.
+// Samples are serialized as flat binary of the trivially-copyable records
+// (samples.h) behind a small header (magic, record size, count). The
+// Python/PyTorch trainer reads them back as a numpy structured dtype
+// (train/data.py); the record-size field guards both sides against silent
+// struct-layout drift.
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <mutex>
 #include <random>
+#include <stdexcept>
+#include <string>
 
 namespace pkrbot::engine {
 
 constexpr int BUFFER_SIZE = 100000;
 
-// Sink for flushing samples out of the simulator (e.g. to disk for the
-// trainer). The default is a no-op; a real binary writer lands in pass 2.
-template <typename T>
-struct SampleSink {
-  virtual ~SampleSink() = default;
-  virtual void write(const T* /*samples*/, size_t /*n*/) {}
-};
+// File layout: three uint64 header fields (magic "PKRS", sizeof(record),
+// record count) followed by `count` raw records.
+constexpr uint64_t SAMPLE_FILE_MAGIC = 0x53524B50;  // "PKRS" little-endian
 
 // Fixed-capacity reservoir of training samples (Algorithm R, per Deep CFR /
 // Brown et al.): every sample ever pushed is equally likely to be in the
@@ -71,5 +71,19 @@ struct SampleBuffer {
   mutable std::mutex mu;
   std::mt19937_64 rng;
 };
+
+// Dump the retained samples to `path` (see the file-layout comment above).
+// Call after the traversal workers have joined; takes the buffer lock only to
+// read `seen`.
+template <typename T>
+void writeSamples(const SampleBuffer<T>& buffer, const std::string& path) {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out) throw std::runtime_error("cannot open sample file for writing: " + path);
+  uint64_t header[3] = {SAMPLE_FILE_MAGIC, sizeof(T), buffer.size()};
+  out.write(reinterpret_cast<const char*>(header), sizeof(header));
+  out.write(reinterpret_cast<const char*>(buffer.samples.data()),
+            static_cast<std::streamsize>(buffer.size() * sizeof(T)));
+  if (!out) throw std::runtime_error("short write to sample file: " + path);
+}
 
 }  // namespace pkrbot::engine

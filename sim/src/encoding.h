@@ -5,7 +5,7 @@
 //
 // The PyTorch trainer consumes InfoSet PODs from disk (buffers.h) and must
 // encode them with a bit-identical Python mirror of encodeInfoSet() below, so
-// that a model trained in PyTorch and exported to TensorRT sees the same
+// that a model trained in PyTorch and exported as TorchScript sees the same
 // tensor layout at inference time. Bump FEATURE_VERSION whenever the layout
 // changes and reject mismatched engines/checkpoints on both sides.
 //
@@ -17,8 +17,12 @@
 //   [11..]    3 hole-card one-hots over 52 (discarded/absent card = all zero)
 //   then      7 board-card one-hots over 52 (hidden card = all zero)
 //   then      legal-action mask, NUM_ABSTRACT_ACTIONS floats
-//   then      MAX_ACTIONS action-history slots, 2 + NUM_ABSTRACT_ACTIONS
-//             floats each: [occupied, actor-is-me, abstract-action one-hot]
+//   then      MAX_ACTIONS action-history slots, 2 + NUM_STREETS +
+//             NUM_ABSTRACT_ACTIONS floats each:
+//             [occupied, actor-is-me, street one-hot, abstract-action one-hot]
+//             The street tag makes each slot's meaning position-independent:
+//             slot index carries only global order, not street identity (which
+//             would otherwise shift with how many actions earlier streets had).
 //
 // Output tensor: float32 [batch, NUM_ABSTRACT_ACTIONS]. For the advantage
 // (regret) net these are predicted advantages; policyFromAdvantages() turns
@@ -34,12 +38,12 @@
 
 namespace pkrbot::engine {
 
-inline constexpr int FEATURE_VERSION = 1;
+inline constexpr int FEATURE_VERSION = 2;
 
 inline constexpr int NUM_CARDS = 52;
 inline constexpr int NUM_STREETS = 6;  // 0, 2, 3, 4, 5, 6
 inline constexpr int NUM_SCALAR_FEATURES = 5;
-inline constexpr int HISTORY_SLOT_SIZE = 2 + NUM_ABSTRACT_ACTIONS;
+inline constexpr int HISTORY_SLOT_SIZE = 2 + NUM_STREETS + NUM_ABSTRACT_ACTIONS;
 inline constexpr int INPUT_SIZE = NUM_STREETS + NUM_SCALAR_FEATURES +
                                   (3 + 7) * NUM_CARDS + NUM_ABSTRACT_ACTIONS +
                                   MAX_ACTIONS * HISTORY_SLOT_SIZE;
@@ -86,7 +90,8 @@ inline void encodeInfoSet(const InfoSet& obs, float* out) {
       const ActionRecord& record = obs.actionHistory.actionRecords[slot];
       p[0] = 1.0f;
       p[1] = record.player == obs.player ? 1.0f : 0.0f;
-      p[2 + static_cast<int>(record.action)] = 1.0f;
+      p[2 + streetIndex(record.street)] = 1.0f;
+      p[2 + NUM_STREETS + static_cast<int>(record.action)] = 1.0f;
     }
     p += HISTORY_SLOT_SIZE;
   }

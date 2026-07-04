@@ -7,8 +7,8 @@
 // therefore comes from concurrency across traversals: the train driver runs
 // many traversal workers, each worker blocks in InferenceBatcher::evaluate()
 // at its decision points, and a dedicated inference thread gathers the blocked
-// workers' infosets into one backend call (UniformPolicy today, the TensorRT
-// engine behind TensorRTPolicy in trt_policy.h once model inference lands).
+// workers' infosets into one backend call (UniformPolicy, or the advantage
+// net behind NetPolicy in net_policy.h).
 //
 // A batch is dispatched when the first of these fires:
 //   1. maxBatchSize requests are pending (a full batch);
@@ -19,7 +19,7 @@
 //
 // maxBatchSize and flushTimeout are hyperparameters (BatchingConfig), surfaced
 // on the train CLI so they can be swept like any other hyperparameter and
-// tuned against the real TensorRT engine's optimization profile. The effective
+// tuned against the real inference engine. The effective
 // batch size is also capped by the worker count -- each blocked worker
 // contributes exactly one pending request -- so tune workers alongside batch
 // size. BatcherStats reports the realized batch-size distribution and which
@@ -46,9 +46,8 @@
 namespace pkrbot::engine {
 
 struct BatchingConfig {
-  // Maximum infosets per backend call. Tune to the TensorRT engine's optimal
-  // profile; must not exceed the max batch dimension the engine was built
-  // with (see trt_policy.h).
+  // Maximum infosets per backend call; also sizes the engine's staging
+  // buffers (see net_policy.h).
   int maxBatchSize = 256;
 
   // How long a partially-filled batch may wait for more requests before it is

@@ -1,27 +1,20 @@
 #pragma once
 
-// Connective layer between the batcher and the future TensorRT engine.
+// Connective layer between the batcher and the neural-net inference engine.
 //
-// TensorRTPolicy already does everything on the C++ side that is independent
-// of TensorRT itself: it owns pinned-style host staging buffers sized to the
-// batch limit, encodes InfoSet batches into the float32 [batch, INPUT_SIZE]
-// input tensor (encoding.h), and decodes the [batch, NUM_ABSTRACT_ACTIONS]
-// advantage output back into policies by regret matching. The only missing
-// piece is InferenceEngine, the seam that will wrap the deserialized TensorRT
-// engine + execution context; loadInferenceEngine() below is the stub that
-// model-inference work replaces.
+// NetPolicy does everything on the C++ side that is independent of the
+// inference runtime: it owns host staging buffers sized to the batch limit,
+// encodes InfoSet batches into the float32 [batch, INPUT_SIZE] input tensor
+// (encoding.h), and decodes the [batch, NUM_ABSTRACT_ACTIONS] advantage
+// output back into policies by regret matching.
 //
-// Plan of record for that work (kept here so the contract survives):
-//   * Train in PyTorch, export weights to ONNX with a dynamic batch axis,
-//     build a TensorRT engine with an optimization profile whose max batch
-//     matches BatchingConfig::maxBatchSize (inference.h) and whose opt batch
-//     is set from the realized batch sizes reported by BatcherStats.
-//   * Implement InferenceEngine as: copy input to device, enqueue on a CUDA
-//     stream, copy output back, synchronize. It is only ever called from the
-//     batcher's single inference thread (see inference.h), so one engine /
-//     context / stream with no internal locking is sufficient.
-//   * Verify engine->inputSize() == INPUT_SIZE and reject engines built for a
-//     different FEATURE_VERSION (encoding.h).
+// InferenceEngine is the runtime seam. The current implementation
+// (torch_engine.cpp) wraps a TorchScript module exported by
+// train/train_advantage.py, loaded via libtorch and run on CUDA when
+// available. It is only ever called from the batcher's single inference
+// thread (see inference.h), so one module + stream with no internal locking
+// is sufficient. Swapping in a faster runtime later (e.g. TensorRT) only
+// means reimplementing loadInferenceEngine().
 
 #include <algorithm>
 #include <memory>
@@ -36,9 +29,9 @@
 
 namespace pkrbot::engine {
 
-// Minimal surface the TensorRT wrapper must implement. Kept free of TensorRT
-// types so this header compiles everywhere; the real implementation lives in
-// a .cpp compiled only where TensorRT is available.
+// Minimal surface the runtime wrapper must implement. Kept free of runtime
+// types so this header compiles everywhere; the implementation lives in
+// torch_engine.cpp, compiled only into targets that link libtorch.
 struct InferenceEngine {
   virtual ~InferenceEngine() = default;
 
@@ -52,20 +45,20 @@ struct InferenceEngine {
   virtual void infer(const float* input, float* output, int batch) = 0;
 };
 
-// Deserialize a TensorRT engine from `enginePath` (a serialized .plan file
-// built from the PyTorch-trained weights). Stub until model inference lands.
-inline std::unique_ptr<InferenceEngine> loadInferenceEngine(const std::string& enginePath) {
-  throw std::runtime_error("TensorRT inference not wired up yet (engine path: " + enginePath +
-                           "); build the .plan from the PyTorch export and implement "
-                           "loadInferenceEngine() in trt_policy.h");
-}
+// Load the TorchScript module exported by export_torchscript() (train/model.py)
+// and wrap it as an InferenceEngine. Rejects modules whose embedded
+// feature-version/shape metadata does not match this build's encoding.h.
+// `maxBatchSize` bounds the per-call batch and sizes NetPolicy's staging
+// buffers; pass BatchingConfig::maxBatchSize.
+std::unique_ptr<InferenceEngine> loadInferenceEngine(const std::string& enginePath,
+                                                     int maxBatchSize);
 
 // PolicyProvider that evaluates the advantage net. Hand it to the
 // InferenceBatcher as the backend and the traversal workers never know the
 // difference from UniformPolicy.
-class TensorRTPolicy : public PolicyProvider {
+class NetPolicy : public PolicyProvider {
  public:
-  explicit TensorRTPolicy(std::unique_ptr<InferenceEngine> engine) : engine_(std::move(engine)) {
+  explicit NetPolicy(std::unique_ptr<InferenceEngine> engine) : engine_(std::move(engine)) {
     if (engine_->inputSize() != INPUT_SIZE) {
       throw std::runtime_error("engine input size " + std::to_string(engine_->inputSize()) +
                                " != encoder INPUT_SIZE " + std::to_string(INPUT_SIZE) +
@@ -81,7 +74,7 @@ class TensorRTPolicy : public PolicyProvider {
 
   void evaluate(const InfoSet* obs, size_t n, PolicyVector* out) override {
     // The batcher caps batches at BatchingConfig::maxBatchSize, but that knob
-    // is tuned independently of the engine build; split defensively so an
+    // is tuned independently of the engine's limit; split defensively so an
     // oversized request never reaches the engine.
     size_t chunk = static_cast<size_t>(engine_->maxBatchSize());
     for (size_t start = 0; start < n; start += chunk) {

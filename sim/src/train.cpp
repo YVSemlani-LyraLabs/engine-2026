@@ -10,18 +10,20 @@
 //
 // Rounds are statically partitioned across workers (worker w runs rounds
 // w+1, w+1+W, ...) with per-round-deterministic seeding, so results are
-// reproducible for a given (seed, workers) pair no matter how the batcher
-// groups requests. The reservoir buffers' retained sets are the one
+// reproducible for a given (iteration, workers) pair no matter how the
+// batcher groups requests. The reservoir buffers' retained sets are the one
 // exception: eviction depends on cross-worker push interleaving.
 //
-// Pass 2 hooks: flush buffers through a real SampleSink (buffers.h) and
-// implement loadInferenceEngine() so --engine swaps UniformPolicy for the
-// TensorRT advantage net (trt_policy.h).
+// The flywheel: --out dumps the regret/strategy reservoirs as flat binary for
+// the Python trainer (train/train_advantage.py), and --engine loads the
+// TorchScript advantage net the trainer exports (net_policy.h), closing the
+// data-collection -> training -> data-collection loop.
 
 #include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <random>
@@ -33,27 +35,31 @@
 #include "deck.h"
 #include "driver.h"
 #include "inference.h"
+#include "net_policy.h"
 #include "policy.h"
 #include "samples.h"
 #include "traverse.h"
-#include "trt_policy.h"
 
 namespace pkrbot::engine {
 
 struct TrainConfig {
   int numRounds = 100000;
-  uint64_t seed = 1;
   // CFR iteration t of this data-collection step, supplied by the outer
   // training loop. Recorded on every sample as the linear-CFR weight (Deep
   // CFR, Brown et al.): all traversals in a step run against the same frozen
   // policy, so they all share t.
   int cfrIteration = 1;
+  // Run seed, derived from the iteration: any single step is reproducible,
+  // while consecutive flywheel steps explore different deals instead of
+  // replaying the same shuffles against each new policy.
+  uint64_t seed() const { return static_cast<uint64_t>(cfrIteration); }
   // Traversal workers submitting to the batcher. The effective batch size is
   // capped by this (each blocked worker contributes one pending request), so
   // it must be tuned together with batching.maxBatchSize.
   int numWorkers = 8;
   BatchingConfig batching;
-  std::string enginePath;  // empty: UniformPolicy; else TensorRT plan file
+  std::string enginePath;  // empty: UniformPolicy; else TorchScript module
+  std::string outDir;      // empty: discard samples; else write regret.bin/strategy.bin here
   // Bypass the batcher: workers call the backend directly with n = 1. Only
   // valid for thread-safe, stateless backends (UniformPolicy), so it is
   // rejected together with --engine. Useful as the A/B baseline when tuning
@@ -98,7 +104,7 @@ void runWorker(const TrainConfig& config, int workerIndex, InferenceBatcher* bat
   PolicyProvider& policy = batcher ? static_cast<PolicyProvider&>(*batched) : backend;
 
   for (int round = workerIndex + 1; round <= config.numRounds; round += config.numWorkers) {
-    uint64_t roundSeed = mixSeed(config.seed * 0x100000001b3ULL + static_cast<uint64_t>(round));
+    uint64_t roundSeed = mixSeed(config.seed() * 0x100000001b3ULL + static_cast<uint64_t>(round));
     Deck deck(roundSeed);
     // Offset to decorrelate opponent-action sampling from the deck's stream.
     std::mt19937_64 rng(roundSeed ^ 0x9e3779b97f4a7c15ULL);
@@ -114,6 +120,8 @@ void runWorker(const TrainConfig& config, int workerIndex, InferenceBatcher* bat
 struct TrainResult {
   std::array<double, 2> bankroll = {0, 0};
   BatcherStats batcherStats;
+  long long regretSamples = 0;
+  long long strategySamples = 0;
 };
 
 TrainResult runGame(const TrainConfig& config) {
@@ -122,13 +130,14 @@ TrainResult runGame(const TrainConfig& config) {
   // offsets per buffer); they only affect which samples are retained, never
   // game trajectories.
   auto regretBuffer =
-      std::make_unique<SampleBuffer<RegretSample>>(config.seed ^ 0xd1b54a32d192ed03ULL);
+      std::make_unique<SampleBuffer<RegretSample>>(config.seed() ^ 0xd1b54a32d192ed03ULL);
   auto strategyBuffer =
-      std::make_unique<SampleBuffer<StrategySample>>(config.seed ^ 0x94d049bb133111ebULL);
+      std::make_unique<SampleBuffer<StrategySample>>(config.seed() ^ 0x94d049bb133111ebULL);
 
   std::unique_ptr<PolicyProvider> backend;
   if (!config.enginePath.empty()) {
-    backend = std::make_unique<TensorRTPolicy>(loadInferenceEngine(config.enginePath));
+    backend = std::make_unique<NetPolicy>(
+        loadInferenceEngine(config.enginePath, config.batching.maxBatchSize));
   } else {
     backend = std::make_unique<UniformPolicy>();
   }
@@ -149,11 +158,19 @@ TrainResult runGame(const TrainConfig& config) {
   }
   for (std::thread& worker : workers) worker.join();
 
+  if (!config.outDir.empty()) {
+    std::filesystem::create_directories(config.outDir);
+    writeSamples(*regretBuffer, config.outDir + "/regret.bin");
+    writeSamples(*strategyBuffer, config.outDir + "/strategy.bin");
+  }
+
   TrainResult result;
   for (const auto& b : bankrolls) {
     result.bankroll[0] += b[0];
     result.bankroll[1] += b[1];
   }
+  result.regretSamples = static_cast<long long>(regretBuffer->size());
+  result.strategySamples = static_cast<long long>(strategyBuffer->size());
   if (batcher) result.batcherStats = batcher->stats();
   return result;
 }
@@ -165,15 +182,17 @@ using namespace pkrbot::engine;
 namespace {
 
 void printUsage(const char* prog) {
-  std::cerr << "usage: " << prog << " [options] [numRounds] [seed]\n"
+  std::cerr << "usage: " << prog << " [options] [numRounds]\n"
             << "  --rounds N            traversal rounds to run (default 100000)\n"
-            << "  --seed S              run seed (default 1)\n"
             << "  --iteration T         CFR iteration of this data-collection step; recorded on\n"
-            << "                        every sample as the linear-CFR weight (default 1)\n"
+            << "                        every sample as the linear-CFR weight and used as the\n"
+            << "                        run seed (default 1)\n"
             << "  --workers W           traversal worker threads (default 8)\n"
             << "  --batch-size B        max infosets per inference call (default 256)\n"
             << "  --flush-timeout-us T  partial-batch flush timeout in microseconds (default 250)\n"
-            << "  --engine PATH         TensorRT plan file (default: uniform policy backend)\n"
+            << "  --engine PATH         TorchScript advantage net exported by the trainer\n"
+            << "                        (default: uniform policy backend)\n"
+            << "  --out DIR             write regret.bin / strategy.bin sample dumps to DIR\n"
             << "  --no-batch            bypass the batcher; workers call the backend directly\n"
             << "                        (uniform backend only; baseline for batch-size tuning)\n";
 }
@@ -193,10 +212,6 @@ bool parseArgs(int argc, char** argv, TrainConfig& config) {
       const char* v = next();
       if (!v) return false;
       config.numRounds = std::atoi(v);
-    } else if (arg == "--seed") {
-      const char* v = next();
-      if (!v) return false;
-      config.seed = std::strtoull(v, nullptr, 10);
     } else if (arg == "--iteration") {
       const char* v = next();
       if (!v) return false;
@@ -217,17 +232,17 @@ bool parseArgs(int argc, char** argv, TrainConfig& config) {
       const char* v = next();
       if (!v) return false;
       config.enginePath = v;
+    } else if (arg == "--out") {
+      const char* v = next();
+      if (!v) return false;
+      config.outDir = v;
     } else if (arg == "--no-batch") {
       config.noBatch = true;
     } else if (arg == "--help" || arg == "-h") {
       return false;
-    } else if (!arg.empty() && arg[0] != '-' && positional < 2) {
-      // Legacy positional form: train [numRounds] [seed].
-      if (positional == 0) {
-        config.numRounds = std::atoi(arg.c_str());
-      } else {
-        config.seed = std::strtoull(arg.c_str(), nullptr, 10);
-      }
+    } else if (!arg.empty() && arg[0] != '-' && positional < 1) {
+      // Legacy positional form: train [numRounds].
+      config.numRounds = std::atoi(arg.c_str());
       ++positional;
     } else {
       std::cerr << "unknown argument: " << arg << "\n";
@@ -241,7 +256,7 @@ bool parseArgs(int argc, char** argv, TrainConfig& config) {
     return false;
   }
   if (config.noBatch && !config.enginePath.empty()) {
-    std::cerr << "--no-batch requires the uniform backend; the TensorRT backend is not "
+    std::cerr << "--no-batch requires the uniform backend; the net backend is not "
                  "thread-safe and must run behind the batcher\n";
     return false;
   }
@@ -267,7 +282,12 @@ int main(int argc, char** argv) {
             << "traverser seat 0:  " << result.bankroll[0] << "\n"
             << "traverser seat 1:  " << result.bankroll[1] << "\n"
             << "throughput:        " << static_cast<long long>(config.numRounds / secs)
-            << " rounds/s\n";
+            << " rounds/s\n"
+            << "regret samples:    " << result.regretSamples << "\n"
+            << "strategy samples:  " << result.strategySamples << "\n";
+  if (!config.outDir.empty()) {
+    std::cout << "sample dumps:      " << config.outDir << "/{regret,strategy}.bin\n";
+  }
   if (!config.noBatch) {
     const BatcherStats& bs = result.batcherStats;
     std::cout << "inference calls:   " << bs.requests << "\n"

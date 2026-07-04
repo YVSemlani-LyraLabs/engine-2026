@@ -1,5 +1,5 @@
-// Tests for the inference batching layer (inference.h) and the TensorRT
-// connective layer (trt_policy.h, with a mock InferenceEngine). Build target:
+// Tests for the inference batching layer (inference.h) and the net-policy
+// connective layer (net_policy.h, with a mock InferenceEngine). Build target:
 // batch_test. Exits 0 and prints "all tests passed" on success.
 
 #include <atomic>
@@ -13,8 +13,8 @@
 #include "encoding.h"
 #include "inference.h"
 #include "infoset.h"
+#include "net_policy.h"
 #include "policy.h"
-#include "trt_policy.h"
 
 // Not <cassert>'s assert: that is compiled out by -DNDEBUG in Release builds,
 // which is how this target is normally built.
@@ -129,7 +129,7 @@ void testCoalescing() {
 }
 
 // Identity-weight mock: emits a fixed advantage pattern so the decode path
-// (regret matching) is exercised end to end through TensorRTPolicy.
+// (regret matching) is exercised end to end through NetPolicy.
 struct MockEngine : InferenceEngine {
   int inputSize() const override { return INPUT_SIZE; }
   int outputSize() const override { return NUM_ABSTRACT_ACTIONS; }
@@ -152,8 +152,8 @@ struct MockEngine : InferenceEngine {
   }
 };
 
-void testTensorRTPolicyDecode() {
-  TensorRTPolicy policy(std::make_unique<MockEngine>());
+void testNetPolicyDecode() {
+  NetPolicy policy(std::make_unique<MockEngine>());
 
   // 6 infosets with a 4-row engine limit also exercises the chunked path.
   std::vector<InfoSet> obs;
@@ -196,7 +196,7 @@ void testPolicyFromAdvantages() {
 int main() {
   using namespace pkrbot::engine;
   testPolicyFromAdvantages();
-  testTensorRTPolicyDecode();
+  testNetPolicyDecode();
   testCoalescing();
   testRoutingUnderConcurrency();
   std::cout << "all tests passed\n";
