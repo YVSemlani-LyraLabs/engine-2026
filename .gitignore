@@ -8,6 +8,8 @@ gamelog.txt
 .metadata/
 build/
 .vscode/
+data/
+nets/
 
 # C++ build artifacts (sim/)
 *.o
